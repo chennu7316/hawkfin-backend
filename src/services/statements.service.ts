@@ -59,6 +59,78 @@ const profitabilityFormulaNames = [
   "ebitMargin",
 ] as const;
 
+const liquidityFormulaNames = [
+  "currentRatio",
+  "quickRatio",
+  "cashRatio",
+  "absoluteLiquidRatio",
+] as const;
+
+const leverageSolvencyFormulaNames = [
+  "debtToEquityRatio",
+  "debtRatio",
+  "equityRatio",
+  "interestCoverageRatio",
+  "debtServiceCoverageRatio",
+] as const;
+
+const cashFlowFormulaNames = [
+  "operatingCashFlowRatio",
+  "freeCashFlow",
+  "cashFlowToRevenueRatio",
+  "cashReturnOnAssets",
+  "cashFlowCoverageRatio",
+  "cashFlowToDebtRatio",
+  "cashFlowAdequacyRatio",
+] as const;
+
+const dupontFormulaNames = ["dupontRoe3Way", "dupontRoe5Way"] as const;
+
+const leverageAnalysisFormulaNames = [
+  "degreeOfOperatingLeverage",
+  "degreeOfFinancialLeverage",
+  "degreeOfCombinedLeverage",
+] as const;
+
+const otherImportantFormulaNames = [
+  "taxRate",
+  "effectiveTaxRate",
+  "employeeCostToRevenueRatio",
+  "financeCostToRevenueRatio",
+  "depreciationToRevenueRatio",
+  "otherExpensesToRevenueRatio",
+  "capitalWorkInProgressRatio",
+  "interestIncomeToInterestExpenseRatio",
+] as const;
+
+const activityEfficiencyFormulaNames = [
+  "inventoryTurnoverRatio",
+  "daysInventoryOutstanding",
+  "receivablesTurnoverRatio",
+  "daysSalesOutstanding",
+  "payablesTurnoverRatio",
+  "daysPayablesOutstanding",
+  "assetTurnoverRatio",
+  "fixedAssetTurnoverRatio",
+  "workingCapitalTurnover",
+  "operatingCycleDays",
+  "cashConversionCycle",
+  "capitalIntensityRatio",
+] as const;
+
+export type DocAiEntityPropertyDetail = {
+  type: string;
+  mentionText: string;
+  confidence: number | null;
+};
+
+export type DocAiEntityDetail = {
+  type: string;
+  mentionText: string;
+  confidence: number | null;
+  properties: DocAiEntityPropertyDetail[];
+};
+
 export type ExtractionResult = {
   processorName: string | null;
   status: "completed" | "failed" | "skipped";
@@ -66,6 +138,10 @@ export type ExtractionResult = {
   revenueFromOperation: number | null;
   costOfMaterialConsumed: number | null;
   entities: Array<{ type: string; mentionText: string }>;
+  /** Full Document AI entity payload (confidence + nested properties) for auditing. */
+  docAiEntitiesDetailed?: DocAiEntityDetail[] | null;
+  /** OCR / layout text length when returned by Document AI. */
+  documentTextLength?: number | null;
   yearAmountPairs: Record<
     string,
     Array<{
@@ -372,13 +448,141 @@ function enrichMetricsForRatioComputation(
   return { metrics, metricSources };
 }
 
-function pickProfitabilityOnly(
+function pickStoredFinancialRatioCategories(
   ratios: ReturnType<typeof computeFinancialRatios> | null,
 ) {
-  if (!ratios?.profitabilityRatios) return null;
+  if (!ratios) return null;
   return {
     profitabilityRatios: ratios.profitabilityRatios,
+    liquidityRatios: ratios.liquidityRatios,
+    leverageSolvencyRatios: ratios.leverageSolvencyRatios,
+    cashFlowRatios: ratios.cashFlowRatios,
+    dupontAnalysis: ratios.dupontAnalysis,
+    leverageAnalysis: ratios.leverageAnalysis,
+    otherImportantRatios: ratios.otherImportantRatios,
+    activityEfficiencyRatios: ratios.activityEfficiencyRatios,
   };
+}
+
+async function upsertFormulaResultsForDocument(
+  documentId: string,
+  ratioCategories: {
+    profitabilityRatios?: Record<string, unknown>;
+    liquidityRatios?: Record<string, unknown>;
+    leverageSolvencyRatios?: Record<string, unknown>;
+    cashFlowRatios?: Record<string, unknown>;
+    dupontAnalysis?: Record<string, unknown>;
+    leverageAnalysis?: Record<string, unknown>;
+    otherImportantRatios?: Record<string, unknown>;
+    activityEfficiencyRatios?: Record<string, unknown>;
+  } | null,
+) {
+  if (!ratioCategories) return;
+
+  const entries: Array<[string, unknown]> = [];
+  for (const [name, value] of Object.entries(
+    ratioCategories.profitabilityRatios ?? {},
+  )) {
+    if (
+      profitabilityFormulaNames.includes(
+        name as (typeof profitabilityFormulaNames)[number],
+      )
+    ) {
+      entries.push([name, value]);
+    }
+  }
+  for (const [name, value] of Object.entries(ratioCategories.liquidityRatios ?? {})) {
+    if (liquidityFormulaNames.includes(name as (typeof liquidityFormulaNames)[number])) {
+      entries.push([name, value]);
+    }
+  }
+  for (const [name, value] of Object.entries(
+    ratioCategories.leverageSolvencyRatios ?? {},
+  )) {
+    if (
+      leverageSolvencyFormulaNames.includes(
+        name as (typeof leverageSolvencyFormulaNames)[number],
+      )
+    ) {
+      entries.push([name, value]);
+    }
+  }
+  for (const [name, value] of Object.entries(ratioCategories.cashFlowRatios ?? {})) {
+    if (
+      cashFlowFormulaNames.includes(name as (typeof cashFlowFormulaNames)[number])
+    ) {
+      entries.push([name, value]);
+    }
+  }
+  for (const [name, value] of Object.entries(ratioCategories.dupontAnalysis ?? {})) {
+    if (dupontFormulaNames.includes(name as (typeof dupontFormulaNames)[number])) {
+      entries.push([name, value]);
+    }
+  }
+  for (const [name, value] of Object.entries(ratioCategories.leverageAnalysis ?? {})) {
+    if (
+      leverageAnalysisFormulaNames.includes(
+        name as (typeof leverageAnalysisFormulaNames)[number],
+      )
+    ) {
+      entries.push([name, value]);
+    }
+  }
+  for (const [name, value] of Object.entries(ratioCategories.otherImportantRatios ?? {})) {
+    if (
+      otherImportantFormulaNames.includes(
+        name as (typeof otherImportantFormulaNames)[number],
+      )
+    ) {
+      entries.push([name, value]);
+    }
+  }
+  for (const [name, value] of Object.entries(
+    ratioCategories.activityEfficiencyRatios ?? {},
+  )) {
+    if (
+      activityEfficiencyFormulaNames.includes(
+        name as (typeof activityEfficiencyFormulaNames)[number],
+      )
+    ) {
+      entries.push([name, value]);
+    }
+  }
+  if (entries.length === 0) return;
+
+  const { rows: activeFormulaRows } = await pool.query(
+    `SELECT id, formula_name
+     FROM formulas
+     WHERE is_active = TRUE
+       AND formula_name = ANY($1::text[])`,
+    [entries.map(([formulaName]) => formulaName)],
+  );
+
+  const formulaIdByName = new Map<string, string>();
+  for (const row of activeFormulaRows) {
+    formulaIdByName.set(String(row.formula_name), String(row.id));
+  }
+
+  for (const [formulaName, ratioResultUnknown] of entries) {
+    const ratioResult = ratioResultUnknown as { value: number | null };
+    const formulaId = formulaIdByName.get(formulaName);
+    if (!formulaId) continue;
+
+    await pool.query(
+      `INSERT INTO formula_results (
+        document_id,
+        formula_id,
+        result_value,
+        details
+      )
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (document_id, formula_id) DO UPDATE
+      SET result_value = EXCLUDED.result_value,
+          details = EXCLUDED.details,
+          calculated_at = NOW()`,
+      [documentId, formulaId, ratioResult.value, JSON.stringify(ratioResult)],
+    );
+  }
 }
 
 function createStorageClient() {
@@ -421,6 +625,66 @@ function createDocumentAiClient() {
       private_key: parsedKey.private_key?.replace(/\\n/g, "\n"),
     },
   });
+}
+
+function mapDocumentAiEntitiesToDetails(
+  rawEntities: Array<{
+    type?: string | null;
+    mentionText?: string | null;
+    confidence?: number | null;
+    properties?: Array<{
+      type?: string | null;
+      mentionText?: string | null;
+      confidence?: number | null;
+    }> | null;
+  }>,
+): DocAiEntityDetail[] {
+  return rawEntities.map((entity) => ({
+    type: String(entity.type ?? ""),
+    mentionText: String(entity.mentionText ?? ""),
+    confidence:
+      typeof entity.confidence === "number" && Number.isFinite(entity.confidence)
+        ? entity.confidence
+        : null,
+    properties:
+      entity.properties?.map((property) => ({
+        type: String(property.type ?? ""),
+        mentionText: String(property.mentionText ?? ""),
+        confidence:
+          typeof property.confidence === "number" &&
+          Number.isFinite(property.confidence)
+            ? property.confidence
+            : null,
+      })) ?? [],
+  }));
+}
+
+/** Payload stored in `document_processing_logs.payload_json` for stage `docai_extract`. */
+function buildDocumentProcessingLogPayload(params: {
+  extraction: ExtractionResult;
+  selectedYearData: { duplicateMetricWarnings: unknown[] };
+  selectedAndRemainingByYear: unknown;
+  uploadYear: string;
+}): Record<string, unknown> {
+  const { extraction, selectedYearData, selectedAndRemainingByYear, uploadYear } =
+    params;
+  return {
+    uploadYear,
+    processorName: extraction.processorName,
+    extractionStatus: extraction.status,
+    extractionError: extraction.error,
+    documentTextLength: extraction.documentTextLength ?? null,
+    entityCount: extraction.entities.length,
+    yearAmountPairs: extraction.yearAmountPairs,
+    selectedAndRemainingByYear,
+    entities: extraction.entities,
+    entitiesDetailed: extraction.docAiEntitiesDetailed ?? null,
+    metricsExtracted: extraction.metrics,
+    metricSources: extraction.metricSources,
+    revenueFromOperation: extraction.revenueFromOperation,
+    costOfMaterialConsumed: extraction.costOfMaterialConsumed,
+    duplicateMetricWarnings: selectedYearData.duplicateMetricWarnings,
+  };
 }
 
 async function saveFileToGcsWithRetry(params: {
@@ -541,6 +805,10 @@ async function extractWithDocumentAI(
       JSON.stringify(yearAmountPairs, null, 2),
     );
 
+    const docAiEntitiesDetailed = mapDocumentAiEntitiesToDetails(rawEntities);
+    const documentTextLength =
+      typeof result.document?.text === "string" ? result.document.text.length : null;
+
     const entities = rawEntities.map((entity) => ({
       type: String(entity.type ?? ""),
       mentionText: String(entity.mentionText ?? ""),
@@ -561,6 +829,8 @@ async function extractWithDocumentAI(
       error: null,
       revenueFromOperation,
       costOfMaterialConsumed,
+      docAiEntitiesDetailed,
+      documentTextLength,
       entities,
       yearAmountPairs,
       metrics,
@@ -721,18 +991,24 @@ async function extractWithDocumentAIBatch(params: {
       const [fileBuffer] = await jsonFile.download();
       const parsed = JSON.parse(fileBuffer.toString("utf8")) as {
         document?: {
+          text?: string | null;
           entities?: Array<{
             type?: string | null;
             mentionText?: string | null;
+            confidence?: number | null;
             properties?: Array<{
               type?: string | null;
               mentionText?: string | null;
+              confidence?: number | null;
             }> | null;
           }>;
         };
       };
       const rawEntities = parsed.document?.entities ?? [];
       const yearAmountPairs = buildYearAmountPairs(rawEntities);
+      const docAiEntitiesDetailed = mapDocumentAiEntitiesToDetails(rawEntities);
+      const documentTextLength =
+        typeof parsed.document?.text === "string" ? parsed.document.text.length : null;
       const entities = rawEntities.map((entity) => ({
         type: String(entity.type ?? ""),
         mentionText: String(entity.mentionText ?? ""),
@@ -751,6 +1027,8 @@ async function extractWithDocumentAIBatch(params: {
           metrics.cost_of_material_consumed ??
           metrics.cost_of_materials_consumed ??
           null,
+        docAiEntitiesDetailed,
+        documentTextLength,
         entities,
         yearAmountPairs,
         metrics,
@@ -858,8 +1136,8 @@ export async function uploadStatement(params: {
   const selectedYearRatios = hasSelectedYearMetrics
     ? computeFinancialRatios(selectedYearData.metrics, selectedYearData.metricSources)
     : null;
-  const selectedYearProfitabilityRatios = pickProfitabilityOnly(selectedYearRatios);
-  const extractedProfitabilityRatios = pickProfitabilityOnly(extraction.ratios);
+  const selectedYearRatioCategories = pickStoredFinancialRatioCategories(selectedYearRatios);
+  const extractedRatioCategories = pickStoredFinancialRatioCategories(extraction.ratios);
   const selectedYearRevenueFromOperation =
     selectedYearData.metrics.revenue_from_operation ??
     selectedYearData.metrics.revenue_from_operations ??
@@ -873,8 +1151,8 @@ export async function uploadStatement(params: {
   const resolvedCostOfMaterialConsumed =
     selectedYearCostOfMaterialConsumed ?? extraction.costOfMaterialConsumed;
   const dbUserId = isUuid(params.userId) ? params.userId : null;
-  const resolvedProfitabilityRatios =
-    selectedYearProfitabilityRatios ?? extractedProfitabilityRatios;
+  const resolvedFinancialRatioCategories =
+    selectedYearRatioCategories ?? extractedRatioCategories;
   const analysisResults = {
     status: extraction.status,
     processorName: extraction.processorName,
@@ -885,11 +1163,11 @@ export async function uploadStatement(params: {
     selectedYearMetrics: selectedYearData.metrics,
     selectedYearMetricSources: selectedYearData.metricSources,
     duplicateMetricWarnings: selectedYearData.duplicateMetricWarnings,
-    selectedYearRatios: selectedYearProfitabilityRatios,
+    selectedYearRatios: selectedYearRatioCategories,
     extractedMetrics: extraction.metrics,
     metricSources: extraction.metricSources,
-    financialRatios: resolvedProfitabilityRatios,
-    extractedFinancialRatios: extractedProfitabilityRatios,
+    financialRatios: resolvedFinancialRatioCategories,
+    extractedFinancialRatios: extractedRatioCategories,
     entities: extraction.entities,
     error: extraction.error,
     convertedFromDocx,
@@ -993,59 +1271,21 @@ export async function uploadStatement(params: {
         "docai_extract",
         extraction.status,
         extraction.error ?? "Document extraction completed.",
-        JSON.stringify({
-          processorName: extraction.processorName,
-          entityCount: extraction.entities.length,
-          duplicateMetricWarnings: selectedYearData.duplicateMetricWarnings,
-        }),
+        JSON.stringify(
+          buildDocumentProcessingLogPayload({
+            extraction,
+            selectedYearData,
+            selectedAndRemainingByYear,
+            uploadYear: params.year,
+          }),
+        ),
       ],
     );
 
-    const profitabilityCategory = resolvedProfitabilityRatios?.profitabilityRatios ?? {};
-    const profitabilityEntries = Object.entries(profitabilityCategory).filter(([name]) =>
-      profitabilityFormulaNames.includes(name as (typeof profitabilityFormulaNames)[number]),
+    await upsertFormulaResultsForDocument(
+      documentId,
+      resolvedFinancialRatioCategories,
     );
-
-    if (profitabilityEntries.length > 0) {
-      const { rows: activeFormulaRows } = await pool.query(
-        `SELECT id, formula_name
-         FROM formulas
-         WHERE is_active = TRUE
-           AND formula_name = ANY($1::text[])`,
-        [profitabilityEntries.map(([formulaName]) => formulaName)],
-      );
-
-      const formulaIdByName = new Map<string, string>();
-      for (const row of activeFormulaRows) {
-        formulaIdByName.set(String(row.formula_name), String(row.id));
-      }
-
-      for (const [formulaName, ratioResultUnknown] of profitabilityEntries) {
-        const ratioResult = ratioResultUnknown as { value: number };
-        const formulaId = formulaIdByName.get(formulaName);
-        if (!formulaId) continue;
-
-        await pool.query(
-          `INSERT INTO formula_results (
-            document_id,
-            formula_id,
-            result_value,
-            details
-          )
-          VALUES ($1, $2, $3, $4)
-          ON CONFLICT (document_id, formula_id) DO UPDATE
-          SET result_value = EXCLUDED.result_value,
-              details = EXCLUDED.details,
-              calculated_at = NOW()`,
-          [
-            documentId,
-            formulaId,
-            ratioResult.value,
-            JSON.stringify(ratioResult),
-          ],
-        );
-      }
-    }
 
     await pool.query("COMMIT");
   } catch (dbError) {
@@ -1241,8 +1481,8 @@ export async function uploadStatementsBatch(params: {
     const selectedYearRatios = hasSelectedYearMetrics
       ? computeFinancialRatios(selectedYearData.metrics, selectedYearData.metricSources)
       : null;
-    const selectedYearProfitabilityRatios = pickProfitabilityOnly(selectedYearRatios);
-    const extractedProfitabilityRatios = pickProfitabilityOnly(extraction.ratios);
+    const selectedYearRatioCategories = pickStoredFinancialRatioCategories(selectedYearRatios);
+    const extractedRatioCategories = pickStoredFinancialRatioCategories(extraction.ratios);
     const selectedYearRevenueFromOperation =
       selectedYearData.metrics.revenue_from_operation ??
       selectedYearData.metrics.revenue_from_operations ??
@@ -1255,8 +1495,8 @@ export async function uploadStatementsBatch(params: {
       selectedYearRevenueFromOperation ?? extraction.revenueFromOperation;
     const resolvedCostOfMaterialConsumed =
       selectedYearCostOfMaterialConsumed ?? extraction.costOfMaterialConsumed;
-    const resolvedProfitabilityRatios =
-      selectedYearProfitabilityRatios ?? extractedProfitabilityRatios;
+    const resolvedFinancialRatioCategories =
+      selectedYearRatioCategories ?? extractedRatioCategories;
     const analysisResults = {
       status: extraction.status,
       processorName: extraction.processorName,
@@ -1267,11 +1507,11 @@ export async function uploadStatementsBatch(params: {
       selectedYearMetrics: selectedYearData.metrics,
       selectedYearMetricSources: selectedYearData.metricSources,
       duplicateMetricWarnings: selectedYearData.duplicateMetricWarnings,
-      selectedYearRatios: selectedYearProfitabilityRatios,
+      selectedYearRatios: selectedYearRatioCategories,
       extractedMetrics: extraction.metrics,
       metricSources: extraction.metricSources,
-      financialRatios: resolvedProfitabilityRatios,
-      extractedFinancialRatios: extractedProfitabilityRatios,
+      financialRatios: resolvedFinancialRatioCategories,
+      extractedFinancialRatios: extractedRatioCategories,
       entities: extraction.entities,
       error: extraction.error,
       convertedFromDocx: entry.convertedFromDocx,
@@ -1370,56 +1610,21 @@ export async function uploadStatementsBatch(params: {
           "docai_extract",
           extraction.status,
           extraction.error ?? "Document extraction completed.",
-          JSON.stringify({
-            processorName: extraction.processorName,
-            entityCount: extraction.entities.length,
-            duplicateMetricWarnings: selectedYearData.duplicateMetricWarnings,
-          }),
+          JSON.stringify(
+            buildDocumentProcessingLogPayload({
+              extraction,
+              selectedYearData,
+              selectedAndRemainingByYear,
+              uploadYear: entry.yearEnding,
+            }),
+          ),
         ],
       );
 
-      const profitabilityCategory = resolvedProfitabilityRatios?.profitabilityRatios ?? {};
-      const profitabilityEntries = Object.entries(profitabilityCategory).filter(([name]) =>
-        profitabilityFormulaNames.includes(name as (typeof profitabilityFormulaNames)[number]),
+      await upsertFormulaResultsForDocument(
+        documentId,
+        resolvedFinancialRatioCategories,
       );
-
-      if (profitabilityEntries.length > 0) {
-        const { rows: activeFormulaRows } = await pool.query(
-          `SELECT id, formula_name
-           FROM formulas
-           WHERE is_active = TRUE
-             AND formula_name = ANY($1::text[])`,
-          [profitabilityEntries.map(([formulaName]) => formulaName)],
-        );
-        const formulaIdByName = new Map<string, string>();
-        for (const row of activeFormulaRows) {
-          formulaIdByName.set(String(row.formula_name), String(row.id));
-        }
-        for (const [formulaName, ratioResultUnknown] of profitabilityEntries) {
-          const ratioResult = ratioResultUnknown as { value: number };
-          const formulaId = formulaIdByName.get(formulaName);
-          if (!formulaId) continue;
-          await pool.query(
-            `INSERT INTO formula_results (
-              document_id,
-              formula_id,
-              result_value,
-              details
-            )
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (document_id, formula_id) DO UPDATE
-            SET result_value = EXCLUDED.result_value,
-                details = EXCLUDED.details,
-                calculated_at = NOW()`,
-            [
-              documentId,
-              formulaId,
-              ratioResult.value,
-              JSON.stringify(ratioResult),
-            ],
-          );
-        }
-      }
       await pool.query("COMMIT");
     } catch (dbError) {
       await pool.query("ROLLBACK");
@@ -1550,7 +1755,19 @@ export async function listStatementHistory(params: {
       ON f.id = fr.formula_id
     WHERE fr.document_id = ANY($1::uuid[])
       AND f.formula_name = ANY($2::text[])`,
-    [documentIds, [...profitabilityFormulaNames]],
+    [
+      documentIds,
+      [
+        ...profitabilityFormulaNames,
+        ...liquidityFormulaNames,
+        ...leverageSolvencyFormulaNames,
+        ...cashFlowFormulaNames,
+        ...dupontFormulaNames,
+        ...leverageAnalysisFormulaNames,
+        ...otherImportantFormulaNames,
+        ...activityEfficiencyFormulaNames,
+      ],
+    ],
   );
 
   const { rows: logRows } = await pool.query(
@@ -1576,7 +1793,22 @@ export async function listStatementHistory(params: {
     warningsByDocumentId.set(documentId, warnings);
   }
 
+  const profitabilityNameSet = new Set<string>(profitabilityFormulaNames);
+  const liquidityNameSet = new Set<string>(liquidityFormulaNames);
+  const leverageNameSet = new Set<string>(leverageSolvencyFormulaNames);
+  const cashFlowNameSet = new Set<string>(cashFlowFormulaNames);
+  const dupontNameSet = new Set<string>(dupontFormulaNames);
+  const leverageAnalysisNameSet = new Set<string>(leverageAnalysisFormulaNames);
+  const otherImportantNameSet = new Set<string>(otherImportantFormulaNames);
+  const activityEfficiencyNameSet = new Set<string>(activityEfficiencyFormulaNames);
   const profitabilityByDocument = new Map<string, Record<string, unknown>>();
+  const liquidityByDocument = new Map<string, Record<string, unknown>>();
+  const leverageByDocument = new Map<string, Record<string, unknown>>();
+  const cashFlowByDocument = new Map<string, Record<string, unknown>>();
+  const dupontByDocument = new Map<string, Record<string, unknown>>();
+  const leverageAnalysisByDocument = new Map<string, Record<string, unknown>>();
+  const otherImportantByDocument = new Map<string, Record<string, unknown>>();
+  const activityEfficiencyByDocument = new Map<string, Record<string, unknown>>();
   for (const row of ratioRows) {
     const documentId = String(row.document_id);
     const formulaName = String(row.formula_name);
@@ -1585,8 +1817,7 @@ export async function listStatementHistory(params: {
         ? (row.details as Record<string, unknown>)
         : {};
 
-    const existing = profitabilityByDocument.get(documentId) ?? {};
-    existing[formulaName] = {
+    const entry = {
       value: toNumber(row.result_value),
       formula:
         typeof details.formula === "string"
@@ -1604,7 +1835,40 @@ export async function listStatementHistory(params: {
           ? details.source
           : "unknown",
     };
-    profitabilityByDocument.set(documentId, existing);
+
+    if (profitabilityNameSet.has(formulaName)) {
+      const existing = profitabilityByDocument.get(documentId) ?? {};
+      existing[formulaName] = entry;
+      profitabilityByDocument.set(documentId, existing);
+    } else if (liquidityNameSet.has(formulaName)) {
+      const existing = liquidityByDocument.get(documentId) ?? {};
+      existing[formulaName] = entry;
+      liquidityByDocument.set(documentId, existing);
+    } else if (leverageNameSet.has(formulaName)) {
+      const existing = leverageByDocument.get(documentId) ?? {};
+      existing[formulaName] = entry;
+      leverageByDocument.set(documentId, existing);
+    } else if (cashFlowNameSet.has(formulaName)) {
+      const existing = cashFlowByDocument.get(documentId) ?? {};
+      existing[formulaName] = entry;
+      cashFlowByDocument.set(documentId, existing);
+    } else if (dupontNameSet.has(formulaName)) {
+      const existing = dupontByDocument.get(documentId) ?? {};
+      existing[formulaName] = entry;
+      dupontByDocument.set(documentId, existing);
+    } else if (leverageAnalysisNameSet.has(formulaName)) {
+      const existing = leverageAnalysisByDocument.get(documentId) ?? {};
+      existing[formulaName] = entry;
+      leverageAnalysisByDocument.set(documentId, existing);
+    } else if (otherImportantNameSet.has(formulaName)) {
+      const existing = otherImportantByDocument.get(documentId) ?? {};
+      existing[formulaName] = entry;
+      otherImportantByDocument.set(documentId, existing);
+    } else if (activityEfficiencyNameSet.has(formulaName)) {
+      const existing = activityEfficiencyByDocument.get(documentId) ?? {};
+      existing[formulaName] = entry;
+      activityEfficiencyByDocument.set(documentId, existing);
+    }
   }
 
   return documentRows.map((row) => {
@@ -1617,7 +1881,16 @@ export async function listStatementHistory(params: {
       {
         revenueFromOperation: number | null;
         costOfMaterialConsumed: number | null;
-        financialRatios: { profitabilityRatios: Record<string, unknown> } | null;
+        financialRatios: {
+          profitabilityRatios: Record<string, unknown>;
+          liquidityRatios: Record<string, unknown>;
+          leverageSolvencyRatios: Record<string, unknown>;
+          cashFlowRatios: Record<string, unknown>;
+          dupontAnalysis: Record<string, unknown>;
+          leverageAnalysis: Record<string, unknown>;
+          otherImportantRatios: Record<string, unknown>;
+          activityEfficiencyRatios: Record<string, unknown>;
+        } | null;
       }
     > = {};
     for (const [bucketKey, metrics] of yearEntries) {
@@ -1638,6 +1911,13 @@ export async function listStatementHistory(params: {
         costOfMaterialConsumed: cost,
         financialRatios: {
           profitabilityRatios: ratios.profitabilityRatios,
+          liquidityRatios: ratios.liquidityRatios,
+          leverageSolvencyRatios: ratios.leverageSolvencyRatios,
+          cashFlowRatios: ratios.cashFlowRatios,
+          dupontAnalysis: ratios.dupontAnalysis,
+          leverageAnalysis: ratios.leverageAnalysis,
+          otherImportantRatios: ratios.otherImportantRatios,
+          activityEfficiencyRatios: ratios.activityEfficiencyRatios,
         },
       };
     }
@@ -1650,17 +1930,74 @@ export async function listStatementHistory(params: {
     const selectedYearData = yearlyData[primaryYear] ?? null;
     const revenue = selectedYearData?.revenueFromOperation ?? null;
     const cost = selectedYearData?.costOfMaterialConsumed ?? null;
-    const profitabilityRatios = profitabilityByDocument.get(documentId) ?? {};
+    const profitabilityRatiosFromDb = profitabilityByDocument.get(documentId) ?? {};
+    const liquidityRatiosFromDb = liquidityByDocument.get(documentId) ?? {};
+    const leverageRatiosFromDb = leverageByDocument.get(documentId) ?? {};
+    const cashFlowRatiosFromDb = cashFlowByDocument.get(documentId) ?? {};
+    const dupontRatiosFromDb = dupontByDocument.get(documentId) ?? {};
+    const leverageAnalysisRatiosFromDb = leverageAnalysisByDocument.get(documentId) ?? {};
+    const otherImportantRatiosFromDb = otherImportantByDocument.get(documentId) ?? {};
+    const activityEfficiencyRatiosFromDb = activityEfficiencyByDocument.get(documentId) ?? {};
+    const computedFinancialRatios = selectedYearData?.financialRatios ?? null;
+    const profitabilityRatios =
+      Object.keys(profitabilityRatiosFromDb).length > 0
+        ? profitabilityRatiosFromDb
+        : computedFinancialRatios?.profitabilityRatios ?? {};
+    const liquidityRatios =
+      Object.keys(liquidityRatiosFromDb).length > 0
+        ? liquidityRatiosFromDb
+        : computedFinancialRatios?.liquidityRatios ?? {};
+    const leverageSolvencyRatios =
+      Object.keys(leverageRatiosFromDb).length > 0
+        ? leverageRatiosFromDb
+        : computedFinancialRatios?.leverageSolvencyRatios ?? {};
+    const cashFlowRatios =
+      Object.keys(cashFlowRatiosFromDb).length > 0
+        ? cashFlowRatiosFromDb
+        : computedFinancialRatios?.cashFlowRatios ?? {};
+    const dupontAnalysis =
+      Object.keys(dupontRatiosFromDb).length > 0
+        ? dupontRatiosFromDb
+        : computedFinancialRatios?.dupontAnalysis ?? {};
+    const leverageAnalysis =
+      Object.keys(leverageAnalysisRatiosFromDb).length > 0
+        ? leverageAnalysisRatiosFromDb
+        : computedFinancialRatios?.leverageAnalysis ?? {};
+    const otherImportantRatios =
+      Object.keys(otherImportantRatiosFromDb).length > 0
+        ? otherImportantRatiosFromDb
+        : computedFinancialRatios?.otherImportantRatios ?? {};
+    const activityEfficiencyRatios =
+      Object.keys(activityEfficiencyRatiosFromDb).length > 0
+        ? activityEfficiencyRatiosFromDb
+        : computedFinancialRatios?.activityEfficiencyRatios ?? {};
+    const hasFinancialRatios =
+      Object.keys(profitabilityRatios).length > 0 ||
+      Object.keys(liquidityRatios).length > 0 ||
+      Object.keys(leverageSolvencyRatios).length > 0 ||
+      Object.keys(cashFlowRatios).length > 0 ||
+      Object.keys(dupontAnalysis).length > 0 ||
+      Object.keys(leverageAnalysis).length > 0 ||
+      Object.keys(otherImportantRatios).length > 0 ||
+      Object.keys(activityEfficiencyRatios).length > 0;
     const duplicateMetricWarnings = warningsByDocumentId.get(documentId) ?? [];
     const analysisResults: Record<string, unknown> = {
       revenueFromOperation: revenue,
       costOfMaterialConsumed: cost,
       duplicateMetricWarnings,
       yearlyData,
-      financialRatios:
-        Object.keys(profitabilityRatios).length > 0
-          ? { profitabilityRatios }
-          : selectedYearData?.financialRatios ?? null,
+      financialRatios: hasFinancialRatios
+        ? {
+            profitabilityRatios,
+            liquidityRatios,
+            leverageSolvencyRatios,
+            cashFlowRatios,
+            dupontAnalysis,
+            leverageAnalysis,
+            otherImportantRatios,
+            activityEfficiencyRatios,
+          }
+        : null,
     };
 
     return {

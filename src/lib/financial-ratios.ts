@@ -70,22 +70,30 @@ function averageWithFallback(params: {
   metrics: MetricMap;
   openingKey: string;
   closingKey: string;
+  /** Shown when only closing is used for the average proxy. */
   fallbackNote: string;
 }) {
   const opening = params.metrics[params.openingKey];
   const closing = params.metrics[params.closingKey];
 
-  if (opening !== null && closing !== null) {
+  if (
+    opening !== null &&
+    opening !== undefined &&
+    Number.isFinite(opening as number) &&
+    closing !== null &&
+    closing !== undefined &&
+    Number.isFinite(closing as number)
+  ) {
     return {
-      value: (opening + closing) / 2,
+      value: ((opening as number) + (closing as number)) / 2,
       missingFields: [] as string[],
       notes: [] as string[],
     };
   }
 
-  if (closing !== null) {
+  if (closing !== null && closing !== undefined && Number.isFinite(closing as number)) {
     return {
-      value: closing,
+      value: closing as number,
       missingFields: [params.openingKey],
       notes: [params.fallbackNote],
     };
@@ -121,6 +129,127 @@ function getMissingMetricNames(
     .map(({ key }) => key);
 }
 
+/** Absolute value for cash-flow ratio inputs (null stays null). */
+function absMetric(v: number | null): number | null {
+  if (v === null || v === undefined || !Number.isFinite(v)) return null;
+  return Math.abs(v);
+}
+
+/** Sum line items; missing components treated as 0. Returns null only if no line item was present. */
+function deriveCurrentAssetsFromLineItems(metrics: MetricMap): number | null {
+  if (
+    metrics.current_assets !== null &&
+    metrics.current_assets !== undefined &&
+    Number.isFinite(metrics.current_assets)
+  ) {
+    return metrics.current_assets;
+  }
+  const parts: MetricValue[] = [
+    metrics.current_investments,
+    metrics.inventories,
+    metrics.trade_receivables,
+    metrics.cash_and_cash_equivalents,
+    metrics.short_term_loans_and_advances,
+    metrics.other_current_assets,
+  ];
+  const hasAny = parts.some(
+    (v) => v !== null && v !== undefined && Number.isFinite(v as number),
+  );
+  if (!hasAny) return null;
+  let total = 0;
+  for (const v of parts) {
+    total += v ?? 0;
+  }
+  return total;
+}
+
+function deriveCurrentLiabilitiesFromLineItems(metrics: MetricMap): number | null {
+  if (
+    metrics.current_liabilities !== null &&
+    metrics.current_liabilities !== undefined &&
+    Number.isFinite(metrics.current_liabilities)
+  ) {
+    return metrics.current_liabilities;
+  }
+  const parts: MetricValue[] = [
+    metrics.short_term_borrowings,
+    metrics.trade_payables,
+    metrics.other_current_liabilities,
+    metrics.short_term_provisions,
+  ];
+  const hasAny = parts.some(
+    (v) => v !== null && v !== undefined && Number.isFinite(v as number),
+  );
+  if (!hasAny) return null;
+  let total = 0;
+  for (const v of parts) {
+    total += v ?? 0;
+  }
+  return total;
+}
+
+function deriveTotalDebtFromBorrowings(metrics: MetricMap): number | null {
+  if (
+    metrics.total_debt !== null &&
+    metrics.total_debt !== undefined &&
+    Number.isFinite(metrics.total_debt)
+  ) {
+    return metrics.total_debt;
+  }
+  const lt = metrics.long_term_borrowings;
+  const st = metrics.short_term_borrowings;
+  const hasAny =
+    (lt !== null && lt !== undefined && Number.isFinite(lt as number)) ||
+    (st !== null && st !== undefined && Number.isFinite(st as number));
+  if (!hasAny) return null;
+  let total = 0;
+  total += lt ?? 0;
+  total += st ?? 0;
+  return total;
+}
+
+function applyDerivedTotalDebt(metrics: MetricMap, metricSources: MetricSourceMap) {
+  const hasTD =
+    metrics.total_debt !== null &&
+    metrics.total_debt !== undefined &&
+    Number.isFinite(metrics.total_debt);
+  if (!hasTD) {
+    const d = deriveTotalDebtFromBorrowings(metrics);
+    if (d !== null) {
+      metrics.total_debt = d;
+      metricSources.total_debt = "derived";
+    }
+  }
+}
+
+function applyDerivedCurrentAssetsAndLiabilities(
+  metrics: MetricMap,
+  metricSources: MetricSourceMap,
+) {
+  const hasCA =
+    metrics.current_assets !== null &&
+    metrics.current_assets !== undefined &&
+    Number.isFinite(metrics.current_assets);
+  if (!hasCA) {
+    const d = deriveCurrentAssetsFromLineItems(metrics);
+    if (d !== null) {
+      metrics.current_assets = d;
+      metricSources.current_assets = "derived";
+    }
+  }
+  const hasCL =
+    metrics.current_liabilities !== null &&
+    metrics.current_liabilities !== undefined &&
+    Number.isFinite(metrics.current_liabilities);
+  if (!hasCL) {
+    const d = deriveCurrentLiabilitiesFromLineItems(metrics);
+    if (d !== null) {
+      metrics.current_liabilities = d;
+      metricSources.current_liabilities = "derived";
+    }
+  }
+}
+
 export function extractFinancialMetricsFromEntities(entities: EntityLike[]) {
   const metrics: MetricMap = {};
   const metricSources: MetricSourceMap = {};
@@ -141,6 +270,7 @@ export function extractFinancialMetricsFromEntities(entities: EntityLike[]) {
     ["property_plant_and_equipment", "property_plant_equipment"],
     ["capital_work_in_progress", "capital_work_in_progresses"],
     ["profit_loss_for_the_year", "profit_for_the_year"],
+    ["variable_costs", "variable_cost"],
   ];
 
   for (const [target, source] of aliases) {
@@ -153,14 +283,7 @@ export function extractFinancialMetricsFromEntities(entities: EntityLike[]) {
     }
   }
 
-  const hasTotalDebt =
-    metrics.total_debt !== null && metrics.total_debt !== undefined;
-  const longTermBorrowings = metrics.long_term_borrowings ?? null;
-  const shortTermBorrowings = metrics.short_term_borrowings ?? null;
-  if (!hasTotalDebt && longTermBorrowings !== null && shortTermBorrowings !== null) {
-    metrics.total_debt = longTermBorrowings + shortTermBorrowings;
-    metricSources.total_debt = "derived";
-  }
+  applyDerivedTotalDebt(metrics, metricSources);
 
   const hasFixedAssets =
     metrics.fixed_assets !== null && metrics.fixed_assets !== undefined;
@@ -175,6 +298,8 @@ export function extractFinancialMetricsFromEntities(entities: EntityLike[]) {
     metricSources.fixed_assets = "derived";
   }
 
+  applyDerivedCurrentAssetsAndLiabilities(metrics, metricSources);
+
   const hasWorkingCapital =
     metrics.working_capital !== null && metrics.working_capital !== undefined;
   const currentAssets = metrics.current_assets ?? null;
@@ -184,53 +309,12 @@ export function extractFinancialMetricsFromEntities(entities: EntityLike[]) {
     metricSources.working_capital = "derived";
   }
 
-  const hasCurrentAssets =
-    metrics.current_assets !== null && metrics.current_assets !== undefined;
   const currentInvestments = metrics.current_investments ?? null;
   const inventories = metrics.inventories ?? null;
   const tradeReceivables = metrics.trade_receivables ?? null;
   const cashAndCashEquivalents = metrics.cash_and_cash_equivalents ?? null;
   const shortTermLoansAndAdvances = metrics.short_term_loans_and_advances ?? null;
   const otherCurrentAssets = metrics.other_current_assets ?? null;
-  if (
-    !hasCurrentAssets &&
-    currentInvestments !== null &&
-    inventories !== null &&
-    tradeReceivables !== null &&
-    cashAndCashEquivalents !== null &&
-    shortTermLoansAndAdvances !== null &&
-    otherCurrentAssets !== null
-  ) {
-    metrics.current_assets =
-      currentInvestments +
-      inventories +
-      tradeReceivables +
-      cashAndCashEquivalents +
-      shortTermLoansAndAdvances +
-      otherCurrentAssets;
-    metricSources.current_assets = "derived";
-  }
-
-  const hasCurrentLiabilities =
-    metrics.current_liabilities !== null &&
-    metrics.current_liabilities !== undefined;
-  const tradePayables = metrics.trade_payables ?? null;
-  const otherCurrentLiabilities = metrics.other_current_liabilities ?? null;
-  const shortTermProvisions = metrics.short_term_provisions ?? null;
-  if (
-    !hasCurrentLiabilities &&
-    shortTermBorrowings !== null &&
-    tradePayables !== null &&
-    otherCurrentLiabilities !== null &&
-    shortTermProvisions !== null
-  ) {
-    metrics.current_liabilities =
-      shortTermBorrowings +
-      tradePayables +
-      otherCurrentLiabilities +
-      shortTermProvisions;
-    metricSources.current_liabilities = "derived";
-  }
 
   const hasTotalEquity =
     metrics.total_equity !== null && metrics.total_equity !== undefined;
@@ -360,6 +444,9 @@ export function computeFinancialRatios(
   metrics: MetricMap,
   metricSources: MetricSourceMap = {},
 ): FinancialRatios {
+  applyDerivedCurrentAssetsAndLiabilities(metrics, metricSources);
+  applyDerivedTotalDebt(metrics, metricSources);
+
   const profitabilityRatios: RatioCategory = {};
   const liquidityRatios: RatioCategory = {};
   const leverageSolvencyRatios: RatioCategory = {};
@@ -447,8 +534,8 @@ export function computeFinancialRatios(
     multiply(
       divide(
         pbt !== null && interestExpense !== null ? pbt + interestExpense : null,
-        totalEquity !== null && longTermBorrowings !== null
-          ? totalEquity + longTermBorrowings
+        totalEquity !== null
+          ? totalEquity + (longTermBorrowings ?? 0)
           : null,
       ),
       100,
@@ -458,8 +545,10 @@ export function computeFinancialRatios(
       { key: "net_profit_before_taxation", value: pbt },
       { key: "interest_expense", value: interestExpense },
       { key: "total_equity", value: totalEquity },
-      { key: "long_term_borrowings", value: longTermBorrowings },
     ]),
+    longTermBorrowings === null
+      ? ["long_term_borrowings not extracted; treated as 0 in capital employed"]
+      : [],
   );
   profitabilityRatios.ebitdaMargin = buildRatio(
     multiply(
@@ -495,71 +584,111 @@ export function computeFinancialRatios(
     ]),
   );
 
+  const liquidityNotesCurrent = [
+    "Note: current_assets = current_investments + inventories + trade_receivables + cash_and_cash_equivalents + short_term_loans_and_advances + other_current_assets",
+    "Note: current_liabilities = short_term_borrowings + trade_payables + other_current_liabilities + short_term_provisions",
+  ];
+  const liquidityNotesQuick = [
+    "Note: quick_assets = current_investments + trade_receivables + cash_and_cash_equivalents + short_term_loans_and_advances + other_current_assets",
+  ];
+
   liquidityRatios.currentRatio = buildRatio(
     divide(currentAssets, currentLiabilities),
     "current_assets / current_liabilities",
-    [currentAssets, currentLiabilities].some((v) => v === null)
-      ? ["current_assets", "current_liabilities"]
-      : [],
+    getMissingMetricNames([
+      { key: "current_assets", value: currentAssets },
+      { key: "current_liabilities", value: currentLiabilities },
+    ]),
+    [...liquidityNotesCurrent],
   );
   liquidityRatios.quickRatio = buildRatio(
     divide(
-      currentAssets !== null && inventories !== null
-        ? currentAssets - inventories
+      currentAssets !== null && currentLiabilities !== null
+        ? currentAssets - (inventories ?? 0)
         : null,
       currentLiabilities,
     ),
     "(current_assets - inventories) / current_liabilities",
-    [currentAssets, inventories, currentLiabilities].some((v) => v === null)
-      ? ["current_assets", "inventories", "current_liabilities"]
-      : [],
+    getMissingMetricNames([
+      { key: "current_assets", value: currentAssets },
+      { key: "current_liabilities", value: currentLiabilities },
+    ]),
+    [...liquidityNotesQuick],
   );
   liquidityRatios.cashRatio = buildRatio(
     divide(
-      cashAndCashEquivalents !== null && shortTermInvestments !== null
-        ? cashAndCashEquivalents + shortTermInvestments
+      currentLiabilities !== null
+        ? (cashAndCashEquivalents ?? 0) + (shortTermInvestments ?? 0)
         : null,
       currentLiabilities,
     ),
-    "(cash_and_cash_equivalents + short-term_investments) / current_liabilities",
-    [cashAndCashEquivalents, shortTermInvestments, currentLiabilities].some(
-      (v) => v === null,
-    )
-      ? [
-          "cash_and_cash_equivalents",
-          "short-term_investments",
-          "current_liabilities",
-        ]
-      : [],
+    "(cash_and_cash_equivalents + short_term_investments) / current_liabilities",
+    getMissingMetricNames([{ key: "current_liabilities", value: currentLiabilities }]),
+    [],
   );
   liquidityRatios.absoluteLiquidRatio = buildRatio(
-    divide(cashAndCashEquivalents, currentLiabilities),
+    divide(
+      currentLiabilities !== null ? (cashAndCashEquivalents ?? 0) : null,
+      currentLiabilities,
+    ),
     "cash_and_cash_equivalents / current_liabilities",
-    [cashAndCashEquivalents, currentLiabilities].some((v) => v === null)
-      ? ["cash_and_cash_equivalents", "current_liabilities"]
-      : [],
+    getMissingMetricNames([{ key: "current_liabilities", value: currentLiabilities }]),
+    [],
   );
+
+  const leverageNoteTotalDebt = [
+    "Note: total_debt = long_term_borrowings + short_term_borrowings (missing borrowings treated as 0 when derived)",
+  ];
+
+  const dscrDenominator = (() => {
+    const hasCashFlow =
+      (interestPaid !== null &&
+        interestPaid !== undefined &&
+        Number.isFinite(interestPaid)) ||
+      (principalRepayment !== null &&
+        principalRepayment !== undefined &&
+        Number.isFinite(principalRepayment));
+    if (hasCashFlow) {
+      const sum = Math.abs(interestPaid ?? 0) + Math.abs(principalRepayment ?? 0);
+      return sum > 0 ? sum : null;
+    }
+    if (interestExpense !== null && Number.isFinite(interestExpense) && interestExpense !== 0) {
+      return Math.abs(interestExpense);
+    }
+    return null;
+  })();
+
+  const dscrNumerator =
+    pbt !== null && interestExpense !== null
+      ? pbt + (depreciation ?? 0) + interestExpense
+      : null;
 
   leverageSolvencyRatios.debtToEquityRatio = buildRatio(
     divide(totalDebt, totalEquity),
     "total_debt / total_equity",
-    [totalDebt, totalEquity].some((v) => v === null)
-      ? ["total_debt", "total_equity"]
-      : [],
+    getMissingMetricNames([
+      { key: "total_debt", value: totalDebt },
+      { key: "total_equity", value: totalEquity },
+    ]),
+    [...leverageNoteTotalDebt],
   );
   leverageSolvencyRatios.debtRatio = buildRatio(
     divide(totalDebt, totalAssets),
     "total_debt / total_assets",
-    [totalDebt, totalAssets].some((v) => v === null)
-      ? ["total_debt", "total_assets"]
-      : [],
+    getMissingMetricNames([
+      { key: "total_debt", value: totalDebt },
+      { key: "total_assets", value: totalAssets },
+    ]),
+    [...leverageNoteTotalDebt],
   );
   leverageSolvencyRatios.equityRatio = buildRatio(
     divide(totalEquity, totalAssets),
     "total_equity / total_assets",
-    [totalEquity, totalAssets].some((v) => v === null)
-      ? ["total_equity", "total_assets"]
-      : [],
+    getMissingMetricNames([
+      { key: "total_equity", value: totalEquity },
+      { key: "total_assets", value: totalAssets },
+    ]),
+    [],
   );
   leverageSolvencyRatios.interestCoverageRatio = buildRatio(
     divide(
@@ -567,34 +696,28 @@ export function computeFinancialRatios(
       interestExpense,
     ),
     "(net_profit_before_taxation + interest_expense) / interest_expense",
-    [pbt, interestExpense].some((v) => v === null)
-      ? ["net_profit_before_taxation", "interest_expense"]
-      : [],
+    getMissingMetricNames([
+      { key: "net_profit_before_taxation", value: pbt },
+      { key: "interest_expense", value: interestExpense },
+    ]),
+    [],
   );
   leverageSolvencyRatios.debtServiceCoverageRatio = buildRatio(
-    divide(
-      pbt !== null && depreciation !== null && interestExpense !== null
-        ? pbt + depreciation + interestExpense
-        : null,
-      interestPaid !== null && principalRepayment !== null
-        ? interestPaid + principalRepayment
-        : null,
-    ),
-    "(net_profit_before_taxation + depreciation_and_amortization_expense + interest_expense) / (interest_paid + principal_repayment)",
-    [pbt, depreciation, interestExpense, interestPaid, principalRepayment].some(
-      (v) => v === null,
-    )
-      ? [
-          "net_profit_before_taxation",
-          "depreciation_and_amortization_expense",
-          "interest_expense",
-          "interest_paid",
-          "principal_repayment",
-        ]
-      : [],
-    principalRepayment === null
-      ? ["Requires additional data: principal_repayment."]
-      : [],
+    divide(dscrNumerator, dscrDenominator),
+    "(net_profit_before_taxation + depreciation_and_amortization_expense + interest_expense) / (abs(interest_paid) + abs(principal_repayment) or interest_expense if cash flow lines missing)",
+    [
+      ...getMissingMetricNames([
+        { key: "net_profit_before_taxation", value: pbt },
+        { key: "interest_expense", value: interestExpense },
+      ]),
+      ...(dscrDenominator === null
+        ? ["interest_paid", "principal_repayment", "interest_expense"]
+        : []),
+    ],
+    [
+      "Note: numerator uses depreciation_and_amortization_expense = 0 when not extracted.",
+      "Note: denominator prefers |interest_paid| + |principal_repayment| (e.g. from cash flow); if absent, uses |interest_expense|.",
+    ],
   );
   leverageSolvencyRatios.fixedAssetsToNetWorth = buildRatio(
     divide(fixedAssets, totalEquity),
@@ -625,40 +748,46 @@ export function computeFinancialRatios(
       : [],
   );
 
+  const warnOpeningInventories =
+    "⚠️ REQUIRES ADDITIONAL DATA: opening_inventories (for calculating average). Alternative: Use closing inventories if opening balance not available.";
+  const warnOpeningReceivables =
+    "⚠️ REQUIRES ADDITIONAL DATA: opening_trade_receivables (for calculating average). Alternative: Use closing trade_receivables if opening balance not available.";
+  const warnOpeningPayables =
+    "⚠️ REQUIRES ADDITIONAL DATA: opening_trade_payables (for calculating average). Alternative: Use closing trade_payables if opening balance not available.";
+  const warnOpeningTotalAssets =
+    "⚠️ REQUIRES ADDITIONAL DATA: opening_total_assets (for calculating average). Alternative: Use closing total_assets if opening balance not available.";
+  const warnOpeningFixedAssets =
+    "⚠️ REQUIRES ADDITIONAL DATA: opening_fixed_assets (for calculating average). Alternative: Use closing fixed_assets if opening balance not available.";
+
   const inventoriesAvg = averageWithFallback({
     metrics,
     openingKey: "opening_inventories",
     closingKey: "inventories",
-    fallbackNote:
-      "Opening inventory not found. Used closing inventories as an alternative.",
+    fallbackNote: warnOpeningInventories,
   });
   const receivablesAvg = averageWithFallback({
     metrics,
     openingKey: "opening_trade_receivables",
     closingKey: "trade_receivables",
-    fallbackNote:
-      "Opening trade receivables not found. Used closing trade receivables as an alternative.",
+    fallbackNote: warnOpeningReceivables,
   });
   const payablesAvg = averageWithFallback({
     metrics,
     openingKey: "opening_trade_payables",
     closingKey: "trade_payables",
-    fallbackNote:
-      "Opening trade payables not found. Used closing trade payables as an alternative.",
+    fallbackNote: warnOpeningPayables,
   });
   const totalAssetsAvg = averageWithFallback({
     metrics,
     openingKey: "opening_total_assets",
     closingKey: "total_assets",
-    fallbackNote:
-      "Opening total assets not found. Used closing total assets as an alternative.",
+    fallbackNote: warnOpeningTotalAssets,
   });
   const fixedAssetsAvg = averageWithFallback({
     metrics,
     openingKey: "opening_fixed_assets",
     closingKey: "fixed_assets",
-    fallbackNote:
-      "Opening fixed assets not found. Used closing fixed assets as an alternative.",
+    fallbackNote: warnOpeningFixedAssets,
   });
 
   const dioValue = multiply(divide(inventoriesAvg.value, costOfMaterials), 365);
@@ -713,23 +842,32 @@ export function computeFinancialRatios(
     [...fixedAssetsAvg.missingFields, ...(revenue === null ? ["revenue_from_operations"] : [])],
     fixedAssetsAvg.notes,
   );
+  const wc = metrics.working_capital ?? null;
   activityEfficiencyRatios.workingCapitalTurnover = buildRatio(
-    divide(revenue, metrics.working_capital ?? null),
+    divide(revenue, wc),
     "revenue_from_operations / working_capital",
-    [revenue, metrics.working_capital ?? null].some((v) => v === null)
-      ? ["revenue_from_operations", "working_capital"]
-      : [],
+    getMissingMetricNames([
+      { key: "revenue_from_operations", value: revenue },
+      { key: "working_capital", value: wc },
+    ]),
+    [
+      "working_capital = current_assets - current_liabilities (derived from line items or totals when needed).",
+    ],
   );
   activityEfficiencyRatios.operatingCycleDays = buildRatio(
     dioValue !== null && dsoValue !== null ? dioValue + dsoValue : null,
-    "DIO + DSO",
+    "DIO + DSO = (average_inventories / cost_of_materials_consumed) * 365 + (average_trade_receivables / revenue_from_operations) * 365",
     [
       ...inventoriesAvg.missingFields,
       ...receivablesAvg.missingFields,
       ...(costOfMaterials === null ? ["cost_of_materials_consumed"] : []),
       ...(revenue === null ? ["revenue_from_operations"] : []),
     ],
-    [...inventoriesAvg.notes, ...receivablesAvg.notes],
+    [
+      "⚠️ REQUIRES ADDITIONAL DATA: opening_inventories, opening_trade_receivables (for averages).",
+      ...inventoriesAvg.notes,
+      ...receivablesAvg.notes,
+    ],
   );
   activityEfficiencyRatios.cashConversionCycle = buildRatio(
     dioValue !== null && dsoValue !== null && dpoValue !== null
@@ -743,14 +881,22 @@ export function computeFinancialRatios(
       ...(costOfMaterials === null ? ["cost_of_materials_consumed"] : []),
       ...(revenue === null ? ["revenue_from_operations"] : []),
     ],
-    [...inventoriesAvg.notes, ...receivablesAvg.notes, ...payablesAvg.notes],
+    [
+      "⚠️ REQUIRES ADDITIONAL DATA: opening_inventories, opening_trade_receivables, opening_trade_payables (for averages).",
+      "Full form: (average_inventories / cost_of_materials_consumed) * 365 + (average_trade_receivables / revenue_from_operations) * 365 - (average_trade_payables / cost_of_materials_consumed) * 365.",
+      ...inventoriesAvg.notes,
+      ...receivablesAvg.notes,
+      ...payablesAvg.notes,
+    ],
   );
   activityEfficiencyRatios.capitalIntensityRatio = buildRatio(
     divide(fixedAssets, revenue),
     "fixed_assets / revenue_from_operations",
-    [fixedAssets, revenue].some((v) => v === null)
-      ? ["fixed_assets", "revenue_from_operations"]
-      : [],
+    getMissingMetricNames([
+      { key: "fixed_assets", value: fixedAssets },
+      { key: "revenue_from_operations", value: revenue },
+    ]),
+    [],
   );
 
   const numberOfEquityShares = metrics.number_of_equity_shares ?? null;
@@ -855,73 +1001,101 @@ export function computeFinancialRatios(
   const ocf = metrics.net_cash_from_operating_activities ?? null;
   const purchaseOfFixedAssets = metrics.purchase_of_fixed_assets ?? null;
 
+  const ocfAbs = absMetric(ocf);
+  const purchaseAbs = absMetric(purchaseOfFixedAssets);
+  const currentLiabilitiesAbs = absMetric(currentLiabilities);
+  const revenueAbs = absMetric(revenue);
+  const totalAssetsAbs = absMetric(totalAssets);
+  const totalDebtAbs = absMetric(totalDebt);
+  const dividendsPaidAbs = absMetric(dividendsPaid);
+  const principalRepaymentAbs = absMetric(principalRepayment);
+
+  const cashFlowNotesAdequacyPrincipal =
+    principalRepayment === null
+      ? ["⚠️ REQUIRES ADDITIONAL DATA: principal_repayment (treated as 0 in denominator)."]
+      : [];
+
+  const cashFlowAbsNote =
+    "Cash flow ratios use absolute values |x| for every input taken from the statements before applying the formula.";
+
+  const adequacyDenominator =
+    ocfAbs === null
+      ? null
+      : (purchaseAbs ?? 0) + (dividendsPaidAbs ?? 0) + (principalRepaymentAbs ?? 0);
+
   cashFlowRatios.operatingCashFlowRatio = buildRatio(
-    divide(ocf, metrics.current_liabilities ?? null),
-    "net_cash_from_operating_activities / current_liabilities",
-    [ocf, metrics.current_liabilities ?? null].some((v) => v === null)
-      ? ["net_cash_from_operating_activities", "current_liabilities"]
-      : [],
+    divide(ocfAbs, currentLiabilitiesAbs),
+    "|net_cash_from_operating_activities| / |current_liabilities|",
+    getMissingMetricNames([
+      { key: "net_cash_from_operating_activities", value: ocf },
+      { key: "current_liabilities", value: currentLiabilities },
+    ]),
+    [cashFlowAbsNote],
   );
   cashFlowRatios.freeCashFlow = buildRatio(
-    ocf !== null && purchaseOfFixedAssets !== null
-      ? ocf - purchaseOfFixedAssets
-      : null,
-    "net_cash_from_operating_activities - purchase_of_fixed_assets",
-    [ocf, purchaseOfFixedAssets].some((v) => v === null)
-      ? ["net_cash_from_operating_activities", "purchase_of_fixed_assets"]
-      : [],
+    ocfAbs !== null ? ocfAbs - (purchaseAbs ?? 0) : null,
+    "|net_cash_from_operating_activities| - |purchase_of_fixed_assets|",
+    getMissingMetricNames([
+      { key: "net_cash_from_operating_activities", value: ocf },
+    ]),
+    [
+      "Amount in ₹; purchase_of_fixed_assets treated as 0 if not extracted.",
+      cashFlowAbsNote,
+    ],
   );
   cashFlowRatios.cashFlowToRevenueRatio = buildRatio(
-    multiply(divide(ocf, revenue), 100),
-    "(net_cash_from_operating_activities / revenue_from_operations) * 100",
-    [ocf, revenue].some((v) => v === null)
-      ? ["net_cash_from_operating_activities", "revenue_from_operations"]
-      : [],
+    multiply(divide(ocfAbs, revenueAbs), 100),
+    "(|net_cash_from_operating_activities| / |revenue_from_operations|) * 100",
+    getMissingMetricNames([
+      { key: "net_cash_from_operating_activities", value: ocf },
+      { key: "revenue_from_operations", value: revenue },
+    ]),
+    [cashFlowAbsNote],
   );
   cashFlowRatios.cashReturnOnAssets = buildRatio(
-    multiply(divide(ocf, totalAssets), 100),
-    "(net_cash_from_operating_activities / total_assets) * 100",
-    [ocf, totalAssets].some((v) => v === null)
-      ? ["net_cash_from_operating_activities", "total_assets"]
-      : [],
+    multiply(divide(ocfAbs, totalAssetsAbs), 100),
+    "(|net_cash_from_operating_activities| / |total_assets|) * 100",
+    getMissingMetricNames([
+      { key: "net_cash_from_operating_activities", value: ocf },
+      { key: "total_assets", value: totalAssets },
+    ]),
+    [cashFlowAbsNote],
   );
   cashFlowRatios.cashFlowCoverageRatio = buildRatio(
-    divide(ocf, totalDebt),
-    "net_cash_from_operating_activities / total_debt",
-    [ocf, totalDebt].some((v) => v === null)
-      ? ["net_cash_from_operating_activities", "total_debt"]
-      : [],
+    divide(ocfAbs, totalDebtAbs),
+    "|net_cash_from_operating_activities| / |total_debt|",
+    getMissingMetricNames([
+      { key: "net_cash_from_operating_activities", value: ocf },
+      { key: "total_debt", value: totalDebt },
+    ]),
+    [
+      "Note: total_debt may be derived from long_term_borrowings + short_term_borrowings.",
+      cashFlowAbsNote,
+    ],
   );
   cashFlowRatios.cashFlowToDebtRatio = buildRatio(
-    divide(ocf, totalDebt),
-    "net_cash_from_operating_activities / total_debt",
-    [ocf, totalDebt].some((v) => v === null)
-      ? ["net_cash_from_operating_activities", "total_debt"]
-      : [],
+    divide(ocfAbs, totalDebtAbs),
+    "|net_cash_from_operating_activities| / |total_debt|",
+    getMissingMetricNames([
+      { key: "net_cash_from_operating_activities", value: ocf },
+      { key: "total_debt", value: totalDebt },
+    ]),
+    ["Same inputs as 6.5; label distinguishes coverage naming in reporting.", cashFlowAbsNote],
   );
   cashFlowRatios.cashFlowAdequacyRatio = buildRatio(
     divide(
-      ocf,
-      purchaseOfFixedAssets !== null &&
-        dividendsPaid !== null &&
-        principalRepayment !== null
-        ? purchaseOfFixedAssets + dividendsPaid + principalRepayment
+      ocfAbs,
+      adequacyDenominator !== null && adequacyDenominator !== 0
+        ? adequacyDenominator
         : null,
     ),
-    "net_cash_from_operating_activities / (purchase_of_fixed_assets + dividends_paid + principal_repayment)",
-    [ocf, purchaseOfFixedAssets, dividendsPaid, principalRepayment].some(
-      (v) => v === null,
-    )
-      ? [
-          "net_cash_from_operating_activities",
-          "purchase_of_fixed_assets",
-          "dividends_paid",
-          "principal_repayment",
-        ]
-      : [],
-    principalRepayment === null
-      ? ["Requires additional data: principal_repayment."]
-      : [],
+    "|net_cash_from_operating_activities| / (|purchase_of_fixed_assets| + |dividends_paid| + |principal_repayment|)",
+    getMissingMetricNames([{ key: "net_cash_from_operating_activities", value: ocf }]),
+    [
+      "Denominator treats missing purchase_of_fixed_assets, dividends_paid, or principal_repayment as 0 when summing.",
+      cashFlowAbsNote,
+      ...cashFlowNotesAdequacyPrincipal,
+    ],
   );
 
   const netProfitMargin = divide(profitForYear, revenue);
@@ -941,10 +1115,18 @@ export function computeFinancialRatios(
     netProfitMargin !== null && assetTurnover !== null && equityMultiplier !== null
       ? netProfitMargin * assetTurnover * equityMultiplier
       : null,
-    "(profit_loss_for_the_year / revenue_from_operations) * (revenue_from_operations / total_assets) * (total_assets / total_equity)",
-    [netProfitMargin, assetTurnover, equityMultiplier].some((v) => v === null)
-      ? ["profit_loss_for_the_year", "revenue_from_operations", "total_assets", "total_equity"]
-      : [],
+    "Net Profit Margin * Asset Turnover * Equity Multiplier = (profit_loss_for_the_year / revenue_from_operations) * (revenue_from_operations / total_assets) * (total_assets / total_equity)",
+    getMissingMetricNames([
+      { key: "profit_loss_for_the_year", value: profitForYear },
+      { key: "revenue_from_operations", value: revenue },
+      { key: "total_assets", value: totalAssets },
+      { key: "total_equity", value: totalEquity },
+    ]),
+    [
+      "Net Profit Margin = profit_loss_for_the_year / revenue_from_operations",
+      "Asset Turnover = revenue_from_operations / total_assets",
+      "Equity Multiplier = total_assets / total_equity",
+    ],
   );
   dupontAnalysis.dupontRoe5Way = buildRatio(
     taxBurden !== null &&
@@ -958,58 +1140,111 @@ export function computeFinancialRatios(
           assetTurnover *
           equityMultiplier
       : null,
-    "Tax Burden * Interest Burden * Operating Margin * Asset Turnover * Equity Multiplier",
-    [taxBurden, interestBurden, operatingMargin, assetTurnover, equityMultiplier].some(
-      (v) => v === null,
-    )
-      ? ["profit_loss_for_the_year", "net_profit_before_taxation", "interest_expense", "revenue_from_operations", "total_assets", "total_equity"]
-      : [],
+    "Tax Burden * Interest Burden * Operating Margin * Asset Turnover * Equity Multiplier = (profit_loss_for_the_year / net_profit_before_taxation) * (net_profit_before_taxation / (net_profit_before_taxation + interest_expense)) * ((net_profit_before_taxation + interest_expense) / revenue_from_operations) * (revenue_from_operations / total_assets) * (total_assets / total_equity)",
+    getMissingMetricNames([
+      { key: "profit_loss_for_the_year", value: profitForYear },
+      { key: "net_profit_before_taxation", value: pbt },
+      { key: "interest_expense", value: interestExpense },
+      { key: "revenue_from_operations", value: revenue },
+      { key: "total_assets", value: totalAssets },
+      { key: "total_equity", value: totalEquity },
+    ]),
+    [
+      "Tax Burden = profit_loss_for_the_year / net_profit_before_taxation",
+      "Interest Burden = net_profit_before_taxation / (net_profit_before_taxation + interest_expense)",
+      "Operating Margin (EBIT Margin) = (net_profit_before_taxation + interest_expense) / revenue_from_operations",
+      "Asset Turnover = revenue_from_operations / total_assets",
+      "Equity Multiplier = total_assets / total_equity",
+    ],
   );
 
-  const contributionApprox =
-    revenue !== null && costOfMaterials !== null ? revenue - costOfMaterials : null;
-  const operatingProfit =
+  const variableCosts = metrics.variable_costs ?? null;
+  const contributionMargin =
+    revenue !== null && variableCosts !== null
+      ? revenue - variableCosts
+      : revenue !== null && costOfMaterials !== null
+        ? revenue - costOfMaterials
+        : null;
+  const operatingProfitForLeverage =
     pbt !== null && interestExpense !== null ? pbt + interestExpense : null;
-  const dol = divide(contributionApprox, operatingProfit);
-  const dfl = divide(operatingProfit, pbt);
+  const dol = divide(contributionMargin, operatingProfitForLeverage);
+  const dolFormula =
+    variableCosts !== null
+      ? "(revenue_from_operations - variable_costs) / (net_profit_before_taxation + interest_expense)"
+      : "(revenue_from_operations - cost_of_materials_consumed) / (net_profit_before_taxation + interest_expense)";
+  const dolMissing =
+    variableCosts !== null
+      ? getMissingMetricNames([
+          { key: "revenue_from_operations", value: revenue },
+          { key: "variable_costs", value: variableCosts },
+          { key: "net_profit_before_taxation", value: pbt },
+          { key: "interest_expense", value: interestExpense },
+        ])
+      : getMissingMetricNames([
+          { key: "revenue_from_operations", value: revenue },
+          { key: "cost_of_materials_consumed", value: costOfMaterials },
+          { key: "net_profit_before_taxation", value: pbt },
+          { key: "interest_expense", value: interestExpense },
+        ]);
+  const dolNotes =
+    variableCosts === null
+      ? [
+          "⚠️ REQUIRES ADDITIONAL DATA: Breakdown of fixed and variable costs.",
+          "Alternative approximation: (revenue_from_operations - cost_of_materials_consumed) / (net_profit_before_taxation + interest_expense).",
+        ]
+      : [
+          "Contribution margin = revenue_from_operations - variable_costs (variable_costs extracted).",
+        ];
+  const dfl = divide(operatingProfitForLeverage, pbt);
+  const dflMissing = getMissingMetricNames([
+    { key: "net_profit_before_taxation", value: pbt },
+    { key: "interest_expense", value: interestExpense },
+  ]);
+  const dclMissing =
+    dol === null || dfl === null
+      ? Array.from(new Set([...dolMissing, ...dflMissing]))
+      : [];
 
   leverageAnalysis.degreeOfOperatingLeverage = buildRatio(
     dol,
-    "(revenue_from_operations - cost_of_materials_consumed) / (net_profit_before_taxation + interest_expense)",
-    [revenue, costOfMaterials, pbt, interestExpense].some((v) => v === null)
-      ? [
-          "revenue_from_operations",
-          "cost_of_materials_consumed",
-          "net_profit_before_taxation",
-          "interest_expense",
-        ]
-      : [],
-    ["Approximation used due to missing variable_costs breakdown."],
+    `contribution_margin / operating_profit = ${dolFormula}`,
+    dolMissing,
+    dolNotes,
   );
   leverageAnalysis.degreeOfFinancialLeverage = buildRatio(
     dfl,
-    "(net_profit_before_taxation + interest_expense) / net_profit_before_taxation",
-    [pbt, interestExpense].some((v) => v === null)
-      ? ["net_profit_before_taxation", "interest_expense"]
-      : [],
+    "EBIT / EBT = (net_profit_before_taxation + interest_expense) / net_profit_before_taxation",
+    dflMissing,
+    [
+      "EBIT = net_profit_before_taxation + interest_expense; EBT = net_profit_before_taxation (DFL = EBIT / EBT).",
+    ],
   );
   leverageAnalysis.degreeOfCombinedLeverage = buildRatio(
     dol !== null && dfl !== null ? dol * dfl : null,
     "DOL * DFL",
-    [dol, dfl].some((v) => v === null)
+    dclMissing,
+    variableCosts === null
       ? [
-          "revenue_from_operations",
-          "cost_of_materials_consumed",
-          "net_profit_before_taxation",
-          "interest_expense",
+          "⚠️ REQUIRES ADDITIONAL DATA: Fixed and variable cost breakdown for accurate DOL (DCL uses approximated DOL when variable costs are not split).",
         ]
       : [],
-    ["Based on approximated DOL."],
   );
 
   const currentTax = metrics.current_tax ?? null;
   const deferredTax = metrics.deferred_tax ?? null;
-  const taxExpense = metrics.tax_expense ?? null;
+  const hasTaxComponents =
+    (currentTax !== null && currentTax !== undefined && Number.isFinite(currentTax)) ||
+    (deferredTax !== null && deferredTax !== undefined && Number.isFinite(deferredTax));
+  const taxSumStatutory = hasTaxComponents
+    ? (currentTax ?? 0) + (deferredTax ?? 0)
+    : null;
+  let taxExpenseResolved = metrics.tax_expense ?? null;
+  if (
+    (taxExpenseResolved === null || taxExpenseResolved === undefined) &&
+    hasTaxComponents
+  ) {
+    taxExpenseResolved = (currentTax ?? 0) + (deferredTax ?? 0);
+  }
   const employeeBenefitsExpense = metrics.employee_benefits_expense ?? null;
   const financeCosts = metrics.finance_costs ?? null;
   const otherExpenses = metrics.other_expenses ?? null;
@@ -1020,26 +1255,23 @@ export function computeFinancialRatios(
   const interestIncome = metrics.interest_income ?? null;
 
   otherImportantRatios.taxRate = buildRatio(
-    multiply(
-      divide(
-        currentTax !== null && deferredTax !== null
-          ? currentTax + deferredTax
-          : null,
-        pbt,
-      ),
-      100,
-    ),
+    multiply(divide(taxSumStatutory, pbt), 100),
     "((current_tax + deferred_tax) / net_profit_before_taxation) * 100",
-    [currentTax, deferredTax, pbt].some((v) => v === null)
-      ? ["current_tax", "deferred_tax", "net_profit_before_taxation"]
-      : [],
+    [
+      ...getMissingMetricNames([{ key: "net_profit_before_taxation", value: pbt }]),
+      ...(hasTaxComponents ? [] : ["current_tax", "deferred_tax"]),
+    ],
   );
   otherImportantRatios.effectiveTaxRate = buildRatio(
-    multiply(divide(taxExpense, pbt), 100),
+    multiply(divide(taxExpenseResolved, pbt), 100),
     "(tax_expense / net_profit_before_taxation) * 100",
-    [taxExpense, pbt].some((v) => v === null)
-      ? ["tax_expense", "net_profit_before_taxation"]
-      : [],
+    getMissingMetricNames([
+      { key: "tax_expense", value: taxExpenseResolved },
+      { key: "net_profit_before_taxation", value: pbt },
+    ]),
+    [
+      "Note: tax_expense should equal current_tax + deferred_tax when both are present; otherwise tax_expense from the statement is used, or current_tax + deferred_tax when tax_expense is missing.",
+    ],
   );
   otherImportantRatios.employeeCostToRevenueRatio = buildRatio(
     multiply(divide(employeeBenefitsExpense, revenue), 100),
@@ -1071,17 +1303,23 @@ export function computeFinancialRatios(
   );
   otherImportantRatios.capitalWorkInProgressRatio = buildRatio(
     multiply(divide(metrics.capital_work_in_progress ?? null, ppeForCwip), 100),
-    "(capital_work_in_progress / property,_plant_&_equipment) * 100",
-    [metrics.capital_work_in_progress ?? null, ppeForCwip].some((v) => v === null)
-      ? ["capital_work_in_progress", "property,_plant_&_equipment"]
-      : [],
+    "(capital_work_in_progress / property_plant_equipment) * 100",
+    getMissingMetricNames([
+      { key: "capital_work_in_progress", value: metrics.capital_work_in_progress ?? null },
+      { key: "property_plant_equipment", value: ppeForCwip },
+    ]),
+    [
+      "Denominator uses property_plant_equipment or property_plant_and_equipment when present.",
+    ],
   );
   otherImportantRatios.interestIncomeToInterestExpenseRatio = buildRatio(
     divide(interestIncome, interestExpense),
     "interest_income / interest_expense",
-    [interestIncome, interestExpense].some((v) => v === null)
-      ? ["interest_income", "interest_expense"]
-      : [],
+    getMissingMetricNames([
+      { key: "interest_income", value: interestIncome },
+      { key: "interest_expense", value: interestExpense },
+    ]),
+    [],
   );
 
   attachRatioSources(profitabilityRatios, metricSources);
