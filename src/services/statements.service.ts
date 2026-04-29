@@ -20,6 +20,9 @@ const allowedMimeTypes = new Set([
 const allowedExtensions = new Set(["pdf", "docx", "xlsx", "xls"]);
 const docxMimeType =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const xlsxMimeType =
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const xlsMimeType = "application/vnd.ms-excel";
 const pdfMimeType = "application/pdf";
 
 const validYears = new Set([
@@ -189,15 +192,24 @@ function isDocxUpload(file: File, ext: string) {
   return ext === "docx" || file.type === docxMimeType;
 }
 
-async function convertDocxToPdfBuffer(docxBuffer: Buffer, originalName: string) {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "docx-to-pdf-"));
-  const sourceName = sanitizeFileName(originalName) || "source.docx";
+function isExcelUpload(file: File, ext: string) {
+  return (
+    ext === "xlsx" ||
+    ext === "xls" ||
+    file.type === xlsxMimeType ||
+    file.type === xlsMimeType
+  );
+}
+
+async function convertOfficeToPdfBuffer(sourceBuffer: Buffer, originalName: string) {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "office-to-pdf-"));
+  const sourceName = sanitizeFileName(originalName) || "source";
   const sourcePath = path.join(tempDir, sourceName);
   const outputFileName = toPdfFileName(sourceName);
   const outputPath = path.join(tempDir, outputFileName);
 
   try {
-    await fs.writeFile(sourcePath, docxBuffer);
+    await fs.writeFile(sourcePath, sourceBuffer);
 
     await new Promise<void>((resolve, reject) => {
       execFile(
@@ -219,13 +231,13 @@ async function convertDocxToPdfBuffer(docxBuffer: Buffer, originalName: string) 
     const maybeErr = error as NodeJS.ErrnoException;
     if (maybeErr?.code === "ENOENT") {
       throw new Error(
-        "DOCX to PDF conversion failed: LibreOffice (soffice) is not installed on the server.",
+        "Office to PDF conversion failed: LibreOffice (soffice) is not installed on the server.",
       );
     }
     throw new Error(
       error instanceof Error
-        ? `DOCX to PDF conversion failed: ${error.message}`
-        : "DOCX to PDF conversion failed.",
+        ? `Office to PDF conversion failed: ${error.message}`
+        : "Office to PDF conversion failed.",
     );
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
@@ -1086,9 +1098,10 @@ export async function uploadStatement(params: {
   let processedFileName = params.file.name;
   let processedMimeType = params.file.type || "application/octet-stream";
   const convertedFromDocx = isDocxUpload(params.file, ext);
+  const convertedFromExcel = !convertedFromDocx && isExcelUpload(params.file, ext);
 
-  if (convertedFromDocx) {
-    processedFileBuffer = await convertDocxToPdfBuffer(fileBuffer, params.file.name);
+  if (convertedFromDocx || convertedFromExcel) {
+    processedFileBuffer = await convertOfficeToPdfBuffer(fileBuffer, params.file.name);
     processedFileName = toPdfFileName(params.file.name);
     processedMimeType = pdfMimeType;
   }
@@ -1171,6 +1184,7 @@ export async function uploadStatement(params: {
     entities: extraction.entities,
     error: extraction.error,
     convertedFromDocx,
+    convertedFromExcel,
     storedContentType: processedMimeType,
   };
 
@@ -1343,6 +1357,7 @@ export async function uploadStatementsBatch(params: {
     processedMimeType: string;
     processedFileBuffer: Buffer;
     convertedFromDocx: boolean;
+    convertedFromExcel: boolean;
   }> = [];
 
   for (const statement of params.statements) {
@@ -1361,9 +1376,10 @@ export async function uploadStatementsBatch(params: {
     let processedFileName = statement.file.name;
     let processedMimeType = statement.file.type || "application/octet-stream";
     const convertedFromDocx = isDocxUpload(statement.file, ext);
+    const convertedFromExcel = !convertedFromDocx && isExcelUpload(statement.file, ext);
 
-    if (convertedFromDocx) {
-      processedFileBuffer = await convertDocxToPdfBuffer(fileBuffer, statement.file.name);
+    if (convertedFromDocx || convertedFromExcel) {
+      processedFileBuffer = await convertOfficeToPdfBuffer(fileBuffer, statement.file.name);
       processedFileName = toPdfFileName(statement.file.name);
       processedMimeType = pdfMimeType;
     }
@@ -1393,6 +1409,7 @@ export async function uploadStatementsBatch(params: {
       processedMimeType,
       processedFileBuffer,
       convertedFromDocx,
+      convertedFromExcel,
     });
   }
 
@@ -1515,6 +1532,7 @@ export async function uploadStatementsBatch(params: {
       entities: extraction.entities,
       error: extraction.error,
       convertedFromDocx: entry.convertedFromDocx,
+      convertedFromExcel: entry.convertedFromExcel,
       storedContentType: entry.processedMimeType,
     };
 
@@ -2028,7 +2046,7 @@ export function classifyUploadError(error: unknown) {
   ) {
     return { status: 400, error: message };
   }
-  if (message.startsWith("DOCX to PDF conversion failed:")) {
+  if (message.startsWith("Office to PDF conversion failed:")) {
     return { status: 500, error: message };
   }
   if (isRetryableStorageError(error)) {
